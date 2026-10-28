@@ -1,0 +1,995 @@
+# JARVIS ANDROID - single-file build. Put this file at .github/workflows/build.yml
+# It writes the whole Android project at build time, compiles it, and publishes the APK as a GitHub Release.
+name: Build Jarvis APK
+on:
+  push:
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - name: Write project files
+        run: |
+          set -e
+          mkdir -p jarvis
+          cd jarvis
+          mkdir -p $(dirname 'settings.gradle.kts')
+          cat > 'settings.gradle.kts' <<'JVEOF0'
+          pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
+          dependencyResolutionManagement { repositories { google(); mavenCentral() } }
+          rootProject.name = "Jarvis"
+          include(":app")
+          JVEOF0
+          mkdir -p $(dirname 'build.gradle.kts')
+          cat > 'build.gradle.kts' <<'JVEOF1'
+          plugins {
+              id("com.android.application") version "8.5.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          JVEOF1
+          mkdir -p $(dirname 'gradle.properties')
+          cat > 'gradle.properties' <<'JVEOF2'
+          android.useAndroidX=true
+          org.gradle.jvmargs=-Xmx3g
+          JVEOF2
+          mkdir -p $(dirname 'app/build.gradle.kts')
+          cat > 'app/build.gradle.kts' <<'JVEOF3'
+          plugins { id("com.android.application"); id("org.jetbrains.kotlin.android") }
+          android {
+              namespace = "com.jarvis.app"
+              compileSdk = 34
+              defaultConfig { applicationId = "com.jarvis.app"; minSdk = 24; targetSdk = 34; versionCode = 2; versionName = "2.0" }
+              buildFeatures { compose = true }
+              composeOptions { kotlinCompilerExtensionVersion = "1.5.14" }
+              compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
+              kotlinOptions { jvmTarget = "17" }
+          }
+          dependencies {
+              implementation(platform("androidx.compose:compose-bom:2024.09.00"))
+              implementation("androidx.compose.ui:ui")
+              implementation("androidx.compose.material3:material3")
+              implementation("androidx.activity:activity-compose:1.9.2")
+              implementation("androidx.core:core-ktx:1.13.1")
+              implementation("androidx.work:work-runtime-ktx:2.9.1")
+          }
+          JVEOF3
+          mkdir -p $(dirname 'app/src/main/res/values/themes.xml')
+          cat > 'app/src/main/res/values/themes.xml' <<'JVEOF4'
+          <resources><style name="Theme.Jarvis" parent="android:Theme.Material.NoActionBar"><item name="android:windowBackground">#040A18</item></style></resources>
+          JVEOF4
+          mkdir -p $(dirname 'app/src/main/res/values/strings.xml')
+          cat > 'app/src/main/res/values/strings.xml' <<'JVEOF5'
+          <resources><string name="acc_desc">Lets Jarvis press buttons, scroll, go home/back and take screenshots when you ask.</string></resources>
+          JVEOF5
+          mkdir -p $(dirname 'app/src/main/res/xml/accessibility_config.xml')
+          cat > 'app/src/main/res/xml/accessibility_config.xml' <<'JVEOF6'
+          <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+              android:accessibilityEventTypes="typeWindowStateChanged"
+              android:accessibilityFeedbackType="feedbackGeneric"
+              android:canRetrieveWindowContent="true"
+              android:description="@string/acc_desc"
+              android:notificationTimeout="100"/>
+          JVEOF6
+          mkdir -p $(dirname 'app/src/main/AndroidManifest.xml')
+          cat > 'app/src/main/AndroidManifest.xml' <<'JVEOF7'
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.INTERNET"/>
+              <uses-permission android:name="android.permission.RECORD_AUDIO"/>
+              <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW"/>
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE"/>
+              <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+              <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT"/>
+              <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES"/>
+              <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
+              <application android:label="Jarvis" android:icon="@android:drawable/ic_btn_speak_now" android:theme="@style/Theme.Jarvis">
+                  <activity android:name=".MainActivity" android:exported="true">
+                      <intent-filter><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent-filter>
+                  </activity>
+                  <service android:name=".OverlayService" android:exported="false" android:foregroundServiceType="microphone"/>
+                  <service android:name=".JarvisAccess" android:exported="true" android:label="Jarvis" android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+                      <intent-filter><action android:name="android.accessibilityservice.AccessibilityService"/></intent-filter>
+                      <meta-data android:name="android.accessibilityservice" android:resource="@xml/accessibility_config"/>
+                  </service>
+                  <receiver android:name=".BootReceiver" android:exported="true">
+                      <intent-filter><action android:name="android.intent.action.BOOT_COMPLETED"/></intent-filter>
+                  </receiver>
+              </application>
+          </manifest>
+          JVEOF7
+          mkdir -p $(dirname 'app/src/main/java/com/jarvis/app/Prefs.kt')
+          cat > 'app/src/main/java/com/jarvis/app/Prefs.kt' <<'JVEOF8'
+          package com.jarvis.app
+          import android.content.Context
+          import android.content.SharedPreferences
+          object Prefs {
+              private lateinit var sp: SharedPreferences
+              fun init(c: Context) { if (!::sp.isInitialized) sp = c.applicationContext.getSharedPreferences("jarvis", 0) }
+              fun get(k: String, d: String = "") = sp.getString(k, d) ?: d
+              fun set(k: String, v: String) = sp.edit().putString(k, v).apply()
+          }
+          JVEOF8
+          mkdir -p $(dirname 'app/src/main/java/com/jarvis/app/Brain.kt')
+          cat > 'app/src/main/java/com/jarvis/app/Brain.kt' <<'JVEOF9'
+          package com.jarvis.app
+          import android.os.Handler
+          import android.os.Looper
+          import org.json.JSONArray
+          import org.json.JSONObject
+          import java.net.HttpURLConnection
+          import java.net.URL
+          import java.util.Date
+          import kotlin.concurrent.thread
+
+          object Net {
+              fun post(url: String, h: Map<String, String>, body: JSONObject): ByteArray {
+                  val c = URL(url).openConnection() as HttpURLConnection
+                  c.requestMethod = "POST"; c.doOutput = true; c.connectTimeout = 10000; c.readTimeout = 30000
+                  c.setRequestProperty("content-type", "application/json")
+                  h.forEach { (k, v) -> c.setRequestProperty(k, v) }
+                  c.outputStream.use { it.write(body.toString().toByteArray()) }
+                  val ok = c.responseCode in 200..299
+                  val bytes = (if (ok) c.inputStream else c.errorStream).readBytes()
+                  if (!ok) throw Exception("HTTP ${c.responseCode} " + String(bytes).take(160))
+                  return bytes
+              }
+              fun get(url: String): String = URL(url).readText()
+          }
+
+          /** Providers: groq (free), gemini (free tier), anthropic (paid, strongest). */
+          object Brain {
+              val providers = listOf("groq", "gemini", "anthropic")
+              val defModel = mapOf("groq" to "llama-3.3-70b-versatile", "gemini" to "gemini-flash-latest", "anthropic" to "claude-sonnet-5-5")
+              private val hist = ArrayList<Pair<String, String>>()
+
+              fun prov() = Prefs.get("prov", "groq")
+              fun key(p: String = prov()) = Prefs.get("key_$p")
+              fun model(p: String = prov()) = Prefs.get("model_$p").ifBlank { defModel[p] ?: "" }
+
+              private fun system(): String {
+                  val mode = if (Prefs.get("mode", "personal") == "commercial")
+                      "COMMERCIAL mode: act as a sharp business strategist (growth, content, revenue, metrics, decisions)."
+                  else "PERSONAL mode: be warm, practical and concise."
+                  return "You are ${Prefs.get("name", "Jarvis")}, a composed, brilliant, slightly dry-witted male AI butler in the spirit of J.A.R.V.I.S. " +
+                      "Address the user as ${Prefs.get("user", "Sir")}. $mode Reply in the language the user speaks (default ${Prefs.get("lang", "en-US")}). " +
+                      "Your words are spoken aloud: at most 3 short sentences, no markdown, no lists, no emojis. Now: ${Date()}."
+              }
+
+              fun ask(q: String, cb: (String) -> Unit) {
+                  val p = prov()
+                  if (key(p).isBlank()) { cb("Add your $p key in the Brain tab first."); return }
+                  thread {
+                      val out = try {
+                          hist.add("user" to q)
+                          while (hist.size > 11) { hist.removeAt(0); hist.removeAt(0) }
+                          val r = when (p) { "anthropic" -> anthropic(); "gemini" -> gemini(); else -> openai() }
+                          hist.add("assistant" to r); r
+                      } catch (e: Exception) {
+                          if (hist.isNotEmpty()) hist.removeAt(hist.size - 1)
+                          if (e.message?.contains("429") == true) "I'm being rate limited. Give me a minute."
+                          else "My brain returned an error. Check the key and model in settings."
+                      }
+                      Handler(Looper.getMainLooper()).post { cb(out) }
+                  }
+              }
+
+              private fun openai(): String {
+                  val a = JSONArray().put(JSONObject().put("role", "system").put("content", system()))
+                  hist.forEach { a.put(JSONObject().put("role", it.first).put("content", it.second)) }
+                  val r = JSONObject(String(Net.post("https://api.groq.com/openai/v1/chat/completions", mapOf("authorization" to "Bearer ${key()}"),
+                      JSONObject().put("model", model()).put("max_tokens", 350).put("messages", a))))
+                  return r.getJSONArray("choices").getJSONObject(0).getJSONObject("message").getString("content").trim()
+              }
+
+              private fun gemini(): String {
+                  val a = JSONArray()
+                  hist.forEach { a.put(JSONObject().put("role", if (it.first == "user") "user" else "model").put("parts", JSONArray().put(JSONObject().put("text", it.second)))) }
+                  val body = JSONObject().put("contents", a)
+                      .put("system_instruction", JSONObject().put("parts", JSONArray().put(JSONObject().put("text", system()))))
+                      .put("generationConfig", JSONObject().put("maxOutputTokens", 900))
+                  val r = JSONObject(String(Net.post("https://generativelanguage.googleapis.com/v1beta/models/${model()}:generateContent", mapOf("x-goog-api-key" to key()), body)))
+                  val parts = r.getJSONArray("candidates").getJSONObject(0).getJSONObject("content").getJSONArray("parts")
+                  return buildString { for (i in 0 until parts.length()) append(parts.getJSONObject(i).optString("text")) }.trim()
+              }
+
+              private fun anthropic(): String {
+                  val a = JSONArray()
+                  hist.forEach { a.put(JSONObject().put("role", it.first).put("content", it.second)) }
+                  val r = JSONObject(String(Net.post("https://api.anthropic.com/v1/messages", mapOf("x-api-key" to key(), "anthropic-version" to "2023-06-01"),
+                      JSONObject().put("model", model()).put("max_tokens", 400).put("system", system()).put("messages", a))))
+                  return r.getJSONArray("content").getJSONObject(0).getString("text").trim()
+              }
+          }
+          JVEOF9
+          mkdir -p $(dirname 'app/src/main/java/com/jarvis/app/Voice.kt')
+          cat > 'app/src/main/java/com/jarvis/app/Voice.kt' <<'JVEOF10'
+          package com.jarvis.app
+          import android.content.Context
+          import android.media.MediaPlayer
+          import android.os.Handler
+          import android.os.Looper
+          import android.speech.tts.TextToSpeech
+          import android.speech.tts.UtteranceProgressListener
+          import android.util.Base64
+          import org.json.JSONObject
+          import java.io.File
+          import java.util.Locale
+          import kotlin.concurrent.thread
+
+          /** Engines: android (built-in), eleven (ElevenLabs), google (Google Cloud TTS). Cloud failure falls back to built-in. */
+          object Voice {
+              private var tts: TextToSpeech? = null
+              private var mp: MediaPlayer? = null
+              private lateinit var app: Context
+              private val main = Handler(Looper.getMainLooper())
+              private var ready = false
+              private var gen = 0
+
+              fun init(c: Context) {
+                  app = c.applicationContext
+                  if (tts == null) tts = TextToSpeech(app) { ready = it == TextToSpeech.SUCCESS }
+              }
+
+              fun stop() { gen++; tts?.stop(); mp?.release(); mp = null }
+
+              fun speak(text: String, onStart: () -> Unit = {}, onEnd: () -> Unit = {}) {
+                  stop()
+                  val my = gen
+                  val e = Prefs.get("engine", "android")
+                  if (e == "android") { local(text, onStart, onEnd); return }
+                  thread {
+                      try {
+                          val bytes = if (e == "eleven") eleven(text) else google(text)
+                          val f = File(app.cacheDir, "jarvis_voice.mp3"); f.writeBytes(bytes)
+                          main.post { if (my == gen) play(f, onStart, onEnd) }
+                      } catch (x: Exception) { main.post { if (my == gen) local(text, onStart, onEnd) } }
+                  }
+              }
+
+              private fun play(f: File, onStart: () -> Unit, onEnd: () -> Unit) {
+                  mp = MediaPlayer().apply {
+                      setDataSource(f.path)
+                      setOnPreparedListener { start(); onStart() }
+                      setOnCompletionListener { onEnd() }
+                      setOnErrorListener { _, _, _ -> onEnd(); true }
+                      prepareAsync()
+                  }
+              }
+
+              private fun local(text: String, onStart: () -> Unit, onEnd: () -> Unit) {
+                  val t = tts
+                  if (t == null || !ready) { main.post { onEnd() }; return }
+                  val lang = Prefs.get("lang", "en-US")
+                  t.language = Locale.forLanguageTag(lang)
+                  t.setPitch(0.7f); t.setSpeechRate(0.95f)
+                  t.voices?.firstOrNull { it.locale.toLanguageTag() == lang && it.name.contains("male", true) && !it.name.contains("female", true) }?.let { t.voice = it }
+                  t.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+                      override fun onStart(id: String?) { main.post { onStart() } }
+                      override fun onDone(id: String?) { main.post { onEnd() } }
+                      override fun onError(id: String?) { main.post { onEnd() } }
+                  })
+                  t.speak(text, TextToSpeech.QUEUE_FLUSH, null, "j")
+              }
+
+              private fun eleven(t: String): ByteArray {
+                  val id = Prefs.get("elVoice", "pNInz6obpgDQGcFmaJgB")
+                  val body = JSONObject().put("text", t).put("model_id", Prefs.get("elModel", "eleven_flash_v2_5"))
+                      .put("voice_settings", JSONObject().put("stability", 0.45).put("similarity_boost", 0.8).put("style", 0.3))
+                  return Net.post("https://api.elevenlabs.io/v1/text-to-speech/$id?output_format=mp3_44100_128", mapOf("xi-api-key" to Prefs.get("elKey")), body)
+              }
+
+              private fun google(t: String): ByteArray {
+                  val v = Prefs.get("gVoice", "en-GB-Neural2-D")
+                  val body = JSONObject().put("input", JSONObject().put("text", t))
+                      .put("voice", JSONObject().put("languageCode", v.split("-").take(2).joinToString("-")).put("name", v))
+                      .put("audioConfig", JSONObject().put("audioEncoding", "MP3"))
+                  val r = JSONObject(String(Net.post("https://texttospeech.googleapis.com/v1/text:synthesize?key=" + Prefs.get("gKey"), emptyMap(), body)))
+                  return Base64.decode(r.getString("audioContent"), Base64.DEFAULT)
+              }
+          }
+          JVEOF10
+          mkdir -p $(dirname 'app/src/main/java/com/jarvis/app/Actions.kt')
+          cat > 'app/src/main/java/com/jarvis/app/Actions.kt' <<'JVEOF11'
+          package com.jarvis.app
+          import android.accessibilityservice.AccessibilityService
+          import android.content.Context
+          import android.content.Intent
+          import android.net.Uri
+          import android.os.Build
+          import android.os.Handler
+          import android.os.Looper
+          import org.json.JSONObject
+          import java.text.SimpleDateFormat
+          import java.util.Date
+          import java.util.Locale
+          import kotlin.concurrent.thread
+
+          object Actions {
+              /** True if handled locally (reply goes through say); false -> send to the AI brain. */
+              fun handle(c: Context, raw: String, say: (String) -> Unit): Boolean {
+                  val t = raw.trim().lowercase().trimEnd('.', '!', '?')
+                  fun go(i: Intent) { i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK); c.startActivity(i) }
+                  fun acc(f: (JarvisAccess) -> Boolean, ok: String) {
+                      val a = JarvisAccess.inst
+                      say(if (a == null) "Enable my accessibility access first, in the Home tab." else if (f(a)) ok else "I couldn't do that on this screen.")
+                  }
+                  fun glob(a: Int, ok: String) = acc({ it.performGlobalAction(a) }, ok)
+                  val click = Regex("^(?:click|tap|press) (?:on )?(.+)$").find(t)
+                  val yt = Regex("^play (.+) on youtube$").find(t) ?: Regex("^youtube (.+)$").find(t)
+                  val web = Regex("^(?:search|google|look up) (?:for )?(.+)$").find(t)
+                  val dial = Regex("^call ([0-9 +]+)$").find(t)
+                  val open = Regex("^(?:open|launch|start) (.+)$").find(t)
+                  when {
+                      Regex("what('s| is) the time|time is it|current time").containsMatchIn(t) ->
+                          say("It's " + SimpleDateFormat("h:mm a", Locale.getDefault()).format(Date()) + ".")
+                      "date" in t && ("today" in t || "what" in t) ->
+                          say("Today is " + SimpleDateFormat("EEEE, MMMM d", Locale.getDefault()).format(Date()) + ".")
+                      t in listOf("go home", "home screen", "go to home") -> glob(AccessibilityService.GLOBAL_ACTION_HOME, "Home.")
+                      t in listOf("go back", "back") -> glob(AccessibilityService.GLOBAL_ACTION_BACK, "Back.")
+                      "recent apps" in t -> glob(AccessibilityService.GLOBAL_ACTION_RECENTS, "Recent apps.")
+                      "open notifications" in t || t == "notifications" -> glob(AccessibilityService.GLOBAL_ACTION_NOTIFICATIONS, "Here are your notifications.")
+                      "screenshot" in t ->
+                          if (Build.VERSION.SDK_INT >= 28) glob(AccessibilityService.GLOBAL_ACTION_TAKE_SCREENSHOT, "Done.") else say("Screenshots need Android 9 or newer.")
+                      t.startsWith("scroll down") -> acc({ it.scroll(true) }, "Scrolling.")
+                      t.startsWith("scroll up") -> acc({ it.scroll(false) }, "Scrolling.")
+                      click != null -> { val x = click.groupValues[1]; acc({ it.clickText(x) }, "Done.") }
+                      Regex("how('s| is) my channel|channel stats|youtube stats|my subscribers").containsMatchIn(t) -> channel(say)
+                      yt != null -> { val q = yt.groupValues[1]; go(Intent(Intent.ACTION_VIEW, Uri.parse("https://www.youtube.com/results?search_query=" + Uri.encode(q)))); say("Playing $q on YouTube.") }
+                      web != null -> { val q = web.groupValues[1]; go(Intent(Intent.ACTION_VIEW, Uri.parse("https://www.google.com/search?q=" + Uri.encode(q)))); say("Searching for $q.") }
+                      dial != null -> { go(Intent(Intent.ACTION_DIAL, Uri.parse("tel:" + dial.groupValues[1].replace(" ", "")))); say("Dialing.") }
+                      open != null -> {
+                          val q = open.groupValues[1]
+                          val pm = c.packageManager
+                          val apps = pm.getInstalledApplications(0)
+                          val app = apps.firstOrNull { pm.getApplicationLabel(it).toString().lowercase() == q }
+                              ?: apps.firstOrNull { pm.getApplicationLabel(it).toString().lowercase().contains(q) }
+                          val i = app?.let { pm.getLaunchIntentForPackage(it.packageName) }
+                          if (app == null || i == null) say("I couldn't find $q on this device.")
+                          else { go(i); say("Opening ${pm.getApplicationLabel(app)}.") }
+                      }
+                      else -> return false
+                  }
+                  return true
+              }
+
+              private fun channel(say: (String) -> Unit) {
+                  val k = Prefs.get("ytKey"); val ch = Prefs.get("ytChannel")
+                  if (k.isBlank() || ch.isBlank()) { say("Add your YouTube key and channel ID in the Alerts tab."); return }
+                  thread {
+                      val msg = try {
+                          val s = JSONObject(Net.get("https://www.googleapis.com/youtube/v3/channels?part=statistics&id=$ch&key=$k"))
+                              .getJSONArray("items").getJSONObject(0).getJSONObject("statistics")
+                          Prefs.get("user", "Sir") + ", you have " + s.getString("subscriberCount") + " subscribers, " +
+                              s.getString("viewCount") + " total views and " + s.getString("videoCount") + " videos."
+                      } catch (e: Exception) { "I couldn't fetch your channel stats." }
+                      Handler(Looper.getMainLooper()).post { say(msg) }
+                  }
+              }
+          }
+          JVEOF11
+          mkdir -p $(dirname 'app/src/main/java/com/jarvis/app/JarvisAccess.kt')
+          cat > 'app/src/main/java/com/jarvis/app/JarvisAccess.kt' <<'JVEOF12'
+          package com.jarvis.app
+          import android.accessibilityservice.AccessibilityService
+          import android.content.Intent
+          import android.view.accessibility.AccessibilityEvent
+          import android.view.accessibility.AccessibilityNodeInfo
+
+          class JarvisAccess : AccessibilityService() {
+              companion object { var inst: JarvisAccess? = null }
+              override fun onServiceConnected() { inst = this }
+              override fun onUnbind(i: Intent?): Boolean { inst = null; return super.onUnbind(i) }
+              override fun onAccessibilityEvent(e: AccessibilityEvent?) {}
+              override fun onInterrupt() {}
+
+              fun clickText(t: String): Boolean {
+                  val root = rootInActiveWindow ?: return false
+                  var n: AccessibilityNodeInfo? = root.findAccessibilityNodeInfosByText(t).firstOrNull()
+                  while (n != null && !n.isClickable) n = n.parent
+                  return n?.performAction(AccessibilityNodeInfo.ACTION_CLICK) ?: false
+              }
+
+              fun scroll(down: Boolean): Boolean {
+                  val root = rootInActiveWindow ?: return false
+                  val s = findScrollable(root) ?: return false
+                  return s.performAction(if (down) AccessibilityNodeInfo.ACTION_SCROLL_FORWARD else AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD)
+              }
+
+              private fun findScrollable(n: AccessibilityNodeInfo): AccessibilityNodeInfo? {
+                  if (n.isScrollable) return n
+                  for (i in 0 until n.childCount) { val c = n.getChild(i) ?: continue; findScrollable(c)?.let { return it } }
+                  return null
+              }
+          }
+          JVEOF12
+          mkdir -p $(dirname 'app/src/main/java/com/jarvis/app/BootReceiver.kt')
+          cat > 'app/src/main/java/com/jarvis/app/BootReceiver.kt' <<'JVEOF13'
+          package com.jarvis.app
+          import android.content.BroadcastReceiver
+          import android.content.Context
+          import android.content.Intent
+          import android.provider.Settings
+          import androidx.core.content.ContextCompat
+
+          class BootReceiver : BroadcastReceiver() {
+              override fun onReceive(c: Context, i: Intent) {
+                  try { if (Settings.canDrawOverlays(c)) ContextCompat.startForegroundService(c, Intent(c, OverlayService::class.java)) } catch (e: Exception) {}
+              }
+          }
+          JVEOF13
+          mkdir -p $(dirname 'app/src/main/java/com/jarvis/app/OrbView.kt')
+          cat > 'app/src/main/java/com/jarvis/app/OrbView.kt' <<'JVEOF14'
+          package com.jarvis.app
+          import android.animation.ValueAnimator
+          import android.content.Context
+          import android.graphics.*
+          import android.view.View
+          import android.view.animation.LinearInterpolator
+          import kotlin.math.sin
+
+          /** Glass bubble orb. state: 0 idle, 1 listening, 2 thinking, 3 speaking. */
+          class OrbView(c: Context) : View(c) {
+              var state = 0
+              var level = 0f
+              private var angle = 0f
+              private val p = Paint(Paint.ANTI_ALIAS_FLAG)
+              private val anim = ValueAnimator.ofFloat(0f, 360f).apply {
+                  duration = 4000; repeatCount = ValueAnimator.INFINITE; interpolator = LinearInterpolator()
+                  addUpdateListener { angle = it.animatedValue as Float; invalidate() }
+              }
+              override fun onAttachedToWindow() { super.onAttachedToWindow(); anim.start() }
+              override fun onDetachedFromWindow() { anim.cancel(); super.onDetachedFromWindow() }
+
+              override fun onDraw(cv: Canvas) {
+                  val cx = width / 2f; val cy = height / 2f
+                  val base = minOf(width, height) / 2f
+                  val k = when (state) { 1 -> 1.04f + 0.1f * level; 3 -> 1f + 0.05f * sin(Math.toRadians(angle * 6.0)).toFloat(); else -> 1f }
+                  val r = base * 0.76f * k
+                  val sp = if (state == 2) 2.6f else 1f
+                  val cyan = 0xFF00E5FF.toInt()
+                  // outer glow
+                  p.shader = null; p.style = Paint.Style.STROKE
+                  for (i in 1..7) { p.strokeWidth = base * 0.04f; p.color = Color.argb(70 - i * 9, 0, 229, 255); cv.drawCircle(cx, cy, r + i * base * 0.03f, p) }
+                  // dark glass body
+                  p.style = Paint.Style.FILL
+                  p.shader = RadialGradient(cx, cy, r, intArrayOf(0xFF000000.toInt(), 0xFF01061F.toInt(), 0xFF0A2BD0.toInt()), floatArrayOf(0f, 0.62f, 1f), Shader.TileMode.CLAMP)
+                  cv.drawCircle(cx, cy, r, p)
+                  // rotating inner blue light + band
+                  val clip = Path().apply { addCircle(cx, cy, r * 0.97f, Path.Direction.CW) }
+                  cv.save(); cv.clipPath(clip)
+                  cv.save(); cv.rotate(angle * sp, cx, cy)
+                  p.shader = SweepGradient(cx, cy, intArrayOf(0x00000000, 0xCC1E4BFF.toInt(), 0x00000000, 0x00000000), floatArrayOf(0f, 0.18f, 0.42f, 1f))
+                  cv.drawCircle(cx, cy, r, p); cv.restore()
+                  p.shader = null; p.style = Paint.Style.STROKE; p.strokeWidth = base * 0.012f; p.color = 0xAA3355FF.toInt()
+                  cv.save(); cv.rotate(-angle * 0.7f * sp + 35f, cx, cy)
+                  cv.drawOval(RectF(cx - r, cy - r * 0.62f, cx + r, cy + r * 0.62f), p); cv.restore()
+                  cv.restore()
+                  // glossy rim
+                  p.strokeWidth = base * 0.07f
+                  p.shader = SweepGradient(cx, cy, intArrayOf(cyan, 0xFFFFFFFF.toInt(), 0xFF00B8D4.toInt(), 0xFF0066FF.toInt(), cyan), null)
+                  cv.save(); cv.rotate(angle * 0.4f, cx, cy); cv.drawCircle(cx, cy, r, p); cv.restore()
+                  // bright crescent
+                  p.shader = null; p.color = 0xCC7DF3FF.toInt(); p.strokeWidth = base * 0.05f; p.strokeCap = Paint.Cap.ROUND
+                  cv.save(); cv.rotate(angle * 0.4f, cx, cy)
+                  cv.drawArc(RectF(cx - r * 0.86f, cy - r * 0.86f, cx + r * 0.86f, cy + r * 0.86f), 25f, 70f, false, p); cv.restore()
+                  p.strokeCap = Paint.Cap.BUTT
+              }
+          }
+          JVEOF14
+          mkdir -p $(dirname 'app/src/main/java/com/jarvis/app/WaveView.kt')
+          cat > 'app/src/main/java/com/jarvis/app/WaveView.kt' <<'JVEOF15'
+          package com.jarvis.app
+          import android.animation.ValueAnimator
+          import android.content.Context
+          import android.graphics.*
+          import android.view.View
+          import android.view.animation.LinearInterpolator
+          import kotlin.math.PI
+          import kotlin.math.sin
+
+          /** Animated voice waveform; set amp (0..1). */
+          class WaveView(c: Context) : View(c) {
+              var amp = 0.12f
+              private var a = 0.12f
+              private var phase = 0f
+              private val p = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; strokeWidth = 3.5f }
+              private val an = ValueAnimator.ofFloat(0f, 1f).apply {
+                  duration = 1000; repeatCount = ValueAnimator.INFINITE; interpolator = LinearInterpolator()
+                  addUpdateListener { phase += 0.2f; a += (amp - a) * 0.15f; invalidate() }
+              }
+              override fun onAttachedToWindow() { super.onAttachedToWindow(); an.start() }
+              override fun onDetachedFromWindow() { an.cancel(); super.onDetachedFromWindow() }
+              override fun onDraw(cv: Canvas) {
+                  val h = height / 2f
+                  for (j in 0..2) {
+                      val path = Path(); path.moveTo(0f, h)
+                      var x = 0
+                      while (x <= width) {
+                          val env = sin(PI * x / width).toFloat()
+                          val y = h + sin(x * 0.028f * (1 + j * 0.45f) + phase * (1 + j * 0.5f)) * h * a * env * (1f - j * 0.28f)
+                          path.lineTo(x.toFloat(), y); x += 6
+                      }
+                      p.color = Color.argb(255 - j * 85, 0, 229, 255)
+                      cv.drawPath(path, p)
+                  }
+              }
+          }
+          JVEOF15
+          mkdir -p $(dirname 'app/src/main/java/com/jarvis/app/OverlayService.kt')
+          cat > 'app/src/main/java/com/jarvis/app/OverlayService.kt' <<'JVEOF16'
+          package com.jarvis.app
+          import android.animation.ValueAnimator
+          import android.app.*
+          import android.content.*
+          import android.content.pm.PackageManager
+          import android.graphics.Color
+          import android.graphics.PixelFormat
+          import android.graphics.drawable.GradientDrawable
+          import android.os.*
+          import android.speech.*
+          import android.view.*
+          import android.widget.*
+          import java.util.Calendar
+
+          class OverlayService : Service() {
+              companion object { var running = false }
+              private val h = Handler(Looper.getMainLooper())
+              private lateinit var wm: WindowManager
+              private lateinit var orb: OrbView
+              private lateinit var wave: WaveView
+              private lateinit var caption: TextView
+              private lateinit var panel: LinearLayout
+              private lateinit var lp: WindowManager.LayoutParams
+              private var sr: SpeechRecognizer? = null
+              private val hide = Runnable { fade(false) }
+              private val unlock = object : BroadcastReceiver() {
+                  override fun onReceive(c: Context, i: Intent) {
+                      val hr = Calendar.getInstance().get(Calendar.HOUR_OF_DAY)
+                      val g = if (hr < 12) "Good morning" else if (hr < 18) "Good afternoon" else "Good evening"
+                      speakOut("$g, ${Prefs.get("user", "Sir")}. ${Prefs.get("name", "Jarvis")} online and at your service.")
+                  }
+              }
+              override fun onBind(i: Intent?): IBinder? = null
+              override fun onStartCommand(i: Intent?, f: Int, id: Int) = START_STICKY
+
+              @Suppress("DEPRECATION")
+              private fun overlayType() = if (Build.VERSION.SDK_INT >= 26) WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY else WindowManager.LayoutParams.TYPE_PHONE
+
+              override fun onCreate() {
+                  super.onCreate(); Prefs.init(this); Voice.init(this); running = true
+                  val nm = getSystemService(NotificationManager::class.java)
+                  if (Build.VERSION.SDK_INT >= 26) nm.createNotificationChannel(NotificationChannel("svc", "Jarvis", NotificationManager.IMPORTANCE_MIN))
+                  val pi = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE)
+                  val n = (if (Build.VERSION.SDK_INT >= 26) Notification.Builder(this, "svc") else Notification.Builder(this))
+                      .setContentTitle("Jarvis is online").setSmallIcon(android.R.drawable.ic_btn_speak_now).setContentIntent(pi).build()
+                  startForeground(1, n)
+                  registerReceiver(unlock, IntentFilter(Intent.ACTION_USER_PRESENT))
+                  wm = getSystemService(WINDOW_SERVICE) as WindowManager
+                  buildPanel(); buildOrb()
+              }
+
+              private fun buildPanel() {
+                  val d = resources.displayMetrics.density
+                  wave = WaveView(this)
+                  caption = TextView(this).apply { setTextColor(Color.WHITE); textSize = 16f; gravity = Gravity.CENTER; maxLines = 6; setPadding(0, (8 * d).toInt(), 0, 0) }
+                  panel = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      background = GradientDrawable().apply { cornerRadius = 28 * d; setColor(0xEB05102A.toInt()); setStroke((1.5f * d).toInt(), 0xAA00E5FF.toInt()) }
+                      setPadding((20 * d).toInt(), (14 * d).toInt(), (20 * d).toInt(), (18 * d).toInt())
+                      addView(wave, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, (56 * d).toInt()))
+                      addView(caption, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+                      alpha = 0f; visibility = View.GONE
+                  }
+                  val w = minOf(resources.displayMetrics.widthPixels * 0.92f, 420 * d).toInt()
+                  val pp = WindowManager.LayoutParams(w, WindowManager.LayoutParams.WRAP_CONTENT, overlayType(),
+                      WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE, PixelFormat.TRANSLUCENT)
+                  pp.gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL; pp.y = (80 * d).toInt()
+                  wm.addView(panel, pp)
+              }
+
+              private fun buildOrb() {
+                  orb = OrbView(this)
+                  val s = (76 * resources.displayMetrics.density).toInt()
+                  lp = WindowManager.LayoutParams(s, s, overlayType(), WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS, PixelFormat.TRANSLUCENT)
+                  lp.gravity = Gravity.TOP or Gravity.START; lp.x = 16; lp.y = 400
+                  var dx = 0f; var dy = 0f; var sx = 0; var sy = 0; var moved = false
+                  orb.setOnTouchListener { _, e ->
+                      when (e.action) {
+                          MotionEvent.ACTION_DOWN -> { dx = e.rawX; dy = e.rawY; sx = lp.x; sy = lp.y; moved = false }
+                          MotionEvent.ACTION_MOVE -> {
+                              if (Math.abs(e.rawX - dx) > 12 || Math.abs(e.rawY - dy) > 12) moved = true
+                              if (moved) { lp.x = sx + (e.rawX - dx).toInt(); lp.y = sy + (e.rawY - dy).toInt(); wm.updateViewLayout(orb, lp) }
+                          }
+                          MotionEvent.ACTION_UP -> if (!moved) listen() else {
+                              val sw = resources.displayMetrics.widthPixels
+                              val to = if (lp.x + s / 2 < sw / 2) 0 else sw - s
+                              ValueAnimator.ofInt(lp.x, to).apply {
+                                  duration = 220
+                                  addUpdateListener { lp.x = it.animatedValue as Int; if (orb.isAttachedToWindow) wm.updateViewLayout(orb, lp) }
+                              }.start()
+                          }
+                      }
+                      true
+                  }
+                  wm.addView(orb, lp)
+              }
+
+              private fun fade(show: Boolean) {
+                  if (show) { panel.animate().cancel(); panel.visibility = View.VISIBLE; panel.animate().alpha(1f).setDuration(180).start() }
+                  else panel.animate().alpha(0f).setDuration(250).withEndAction { panel.visibility = View.GONE }.start()
+              }
+
+              private fun ui(s: Int, t: String) {
+                  h.removeCallbacks(hide)
+                  orb.state = s
+                  wave.amp = when (s) { 1 -> 0.7f; 2 -> 0.25f; 3 -> 0.75f; else -> 0.12f }
+                  caption.text = t
+                  fade(true)
+              }
+
+              private fun idle() { orb.state = 0; wave.amp = 0.12f; h.postDelayed(hide, 3000) }
+
+              private fun speakOut(t: String) { ui(3, t); Voice.speak(t, onEnd = { idle() }) }
+
+              private fun listen() {
+                  if (checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+                      Toast.makeText(this, "Open Jarvis and grant the microphone", Toast.LENGTH_LONG).show(); return
+                  }
+                  if (!SpeechRecognizer.isRecognitionAvailable(this)) { Toast.makeText(this, "Speech recognition unavailable", Toast.LENGTH_LONG).show(); return }
+                  Voice.stop(); sr?.destroy()
+                  ui(1, "Hi ${Prefs.get("user", "Sir")}, how can I help you…")
+                  sr = SpeechRecognizer.createSpeechRecognizer(this)
+                  sr?.setRecognitionListener(object : RecognitionListener {
+                      override fun onResults(r: Bundle?) {
+                          val t = r?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()
+                          if (t == null) { ui(0, "I didn't catch that."); idle(); return }
+                          ui(2, "“$t”")
+                          if (!Actions.handle(this@OverlayService, t) { speakOut(it) }) Brain.ask(t) { speakOut(it) }
+                      }
+                      override fun onPartialResults(b: Bundle?) { b?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()?.let { caption.text = it } }
+                      override fun onRmsChanged(v: Float) { val l = v.coerceIn(0f, 10f) / 10f; wave.amp = 0.2f + l * 0.8f; orb.level = l }
+                      override fun onError(e: Int) {
+                          val quiet = e == SpeechRecognizer.ERROR_NO_MATCH || e == SpeechRecognizer.ERROR_SPEECH_TIMEOUT
+                          ui(0, if (quiet) "I didn't catch that." else "Voice error $e"); idle()
+                      }
+                      override fun onReadyForSpeech(p: Bundle?) {}
+                      override fun onBeginningOfSpeech() {}
+                      override fun onBufferReceived(b: ByteArray?) {}
+                      override fun onEndOfSpeech() {}
+                      override fun onEvent(t: Int, b: Bundle?) {}
+                  })
+                  sr?.startListening(Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
+                      .putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                      .putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+                      .putExtra(RecognizerIntent.EXTRA_LANGUAGE, Prefs.get("lang", "en-US")))
+              }
+
+              override fun onDestroy() {
+                  running = false
+                  try { unregisterReceiver(unlock) } catch (e: Exception) {}
+                  sr?.destroy(); Voice.stop()
+                  if (::orb.isInitialized) wm.removeView(orb)
+                  if (::panel.isInitialized) wm.removeView(panel)
+                  super.onDestroy()
+              }
+          }
+          JVEOF16
+          mkdir -p $(dirname 'app/src/main/java/com/jarvis/app/ViralWorker.kt')
+          cat > 'app/src/main/java/com/jarvis/app/ViralWorker.kt' <<'JVEOF17'
+          package com.jarvis.app
+          import android.app.*
+          import android.content.Context
+          import android.content.Intent
+          import android.os.Build
+          import androidx.work.*
+          import org.json.JSONObject
+          import java.util.concurrent.TimeUnit
+
+          /** Every ~15 min: checks newest YouTube video; alerts if views gained >= your threshold. */
+          class ViralWorker(c: Context, p: WorkerParameters) : Worker(c, p) {
+              companion object {
+                  fun schedule(c: Context) {
+                      WorkManager.getInstance(c).enqueueUniquePeriodicWork("viral", ExistingPeriodicWorkPolicy.UPDATE,
+                          PeriodicWorkRequestBuilder<ViralWorker>(15, TimeUnit.MINUTES)
+                              .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build()).build())
+                  }
+              }
+
+              override fun doWork(): Result {
+                  Prefs.init(applicationContext)
+                  val key = Prefs.get("ytKey"); val ch = Prefs.get("ytChannel")
+                  if (key.isBlank() || ch.isBlank()) return Result.success()
+                  val thresh = Prefs.get("ytThresh", "1000").toLongOrNull() ?: 1000L
+                  try {
+                      val s = JSONObject(Net.get("https://www.googleapis.com/youtube/v3/search?part=snippet&channelId=$ch&order=date&maxResults=1&type=video&key=$key"))
+                      val v = s.getJSONArray("items").getJSONObject(0)
+                      val id = v.getJSONObject("id").getString("videoId")
+                      val title = v.getJSONObject("snippet").getString("title")
+                      val st = JSONObject(Net.get("https://www.googleapis.com/youtube/v3/videos?part=statistics&id=$id&key=$key"))
+                      val views = st.getJSONArray("items").getJSONObject(0).getJSONObject("statistics").getString("viewCount").toLong()
+                      val last = Prefs.get("lastViews_$id", "-1").toLong()
+                      Prefs.set("lastViews_$id", views.toString())
+                      if (last >= 0 && views - last >= thresh)
+                          alert(Prefs.get("user", "Sir") + ", your video is going viral!", "\"$title\" gained ${views - last} views in ~15 min (total $views).")
+                  } catch (e: Exception) { return Result.retry() }
+                  return Result.success()
+              }
+
+              private fun alert(t: String, b: String) {
+                  val c = applicationContext
+                  val nm = c.getSystemService(NotificationManager::class.java)
+                  if (Build.VERSION.SDK_INT >= 26) nm.createNotificationChannel(NotificationChannel("viral", "Viral alerts", NotificationManager.IMPORTANCE_HIGH))
+                  val pi = PendingIntent.getActivity(c, 0, Intent(c, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE)
+                  val n = (if (Build.VERSION.SDK_INT >= 26) Notification.Builder(c, "viral") else Notification.Builder(c))
+                      .setSmallIcon(android.R.drawable.ic_dialog_info).setContentTitle(t).setContentText(b)
+                      .setStyle(Notification.BigTextStyle().bigText(b))
+                      .setCategory(Notification.CATEGORY_CALL).setFullScreenIntent(pi, true).setContentIntent(pi).setAutoCancel(true).build()
+                  nm.notify(42, n)
+              }
+          }
+          JVEOF17
+          mkdir -p $(dirname 'app/src/main/java/com/jarvis/app/MainActivity.kt')
+          cat > 'app/src/main/java/com/jarvis/app/MainActivity.kt' <<'JVEOF18'
+          @file:OptIn(ExperimentalMaterial3Api::class)
+          package com.jarvis.app
+          import android.Manifest
+          import android.content.Intent
+          import android.content.pm.PackageManager
+          import android.net.Uri
+          import android.os.Build
+          import android.os.Bundle
+          import android.provider.Settings
+          import androidx.activity.ComponentActivity
+          import androidx.activity.compose.rememberLauncherForActivityResult
+          import androidx.activity.compose.setContent
+          import androidx.activity.result.contract.ActivityResultContracts
+          import androidx.compose.animation.core.*
+          import androidx.compose.foundation.*
+          import androidx.compose.foundation.layout.*
+          import androidx.compose.foundation.shape.RoundedCornerShape
+          import androidx.compose.material3.*
+          import androidx.compose.runtime.*
+          import androidx.compose.ui.Alignment
+          import androidx.compose.ui.Modifier
+          import androidx.compose.ui.draw.clip
+          import androidx.compose.ui.draw.drawBehind
+          import androidx.compose.ui.geometry.Offset
+          import androidx.compose.ui.graphics.Brush
+          import androidx.compose.ui.graphics.Color
+          import androidx.compose.ui.text.font.FontWeight
+          import androidx.compose.ui.text.input.PasswordVisualTransformation
+          import androidx.compose.ui.text.input.VisualTransformation
+          import androidx.compose.ui.unit.dp
+          import androidx.compose.ui.unit.sp
+          import androidx.compose.ui.viewinterop.AndroidView
+          import androidx.core.content.ContextCompat
+
+          class MainActivity : ComponentActivity() {
+              private var tick by mutableStateOf(0)
+              override fun onCreate(s: Bundle?) { super.onCreate(s); Prefs.init(this); Voice.init(this); setContent { App() } }
+              override fun onResume() { super.onResume(); tick++ }
+
+              private fun launchJarvis() {
+                  if (!Settings.canDrawOverlays(this)) {
+                      startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName"))); return
+                  }
+                  ContextCompat.startForegroundService(this, Intent(this, OverlayService::class.java))
+                  ViralWorker.schedule(this)
+                  tick++
+              }
+
+              @Composable
+              fun App() {
+                  var dark by remember { mutableStateOf(Prefs.get("dark", "1") == "1") }
+                  var tab by remember { mutableStateOf(0) }
+                  val perms = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { launchJarvis() }
+                  val start = {
+                      val p = mutableListOf(Manifest.permission.RECORD_AUDIO)
+                      if (Build.VERSION.SDK_INT >= 33) p.add(Manifest.permission.POST_NOTIFICATIONS)
+                      perms.launch(p.toTypedArray())
+                  }
+                  val bg = if (dark) Color(0xFF040A18) else Color(0xFFEAF2FF)
+                  val fg = if (dark) Color.White else Color(0xFF0A1630)
+                  val tr = rememberInfiniteTransition(label = "bg")
+                  val a by tr.animateFloat(0f, 1f, infiniteRepeatable(tween(9000, easing = LinearEasing), RepeatMode.Reverse), label = "a")
+                  val tabs = listOf("🏠" to "Home", "🧠" to "Brain", "🎙" to "Voice", "🔔" to "Alerts", "👤" to "Profile")
+                  val scheme = if (dark) darkColorScheme(primary = Color(0xFF00E5FF), onPrimary = Color.Black, onSurface = fg, onSurfaceVariant = fg)
+                  else lightColorScheme(primary = Color(0xFF0066FF), onSurface = fg, onSurfaceVariant = fg)
+                  MaterialTheme(colorScheme = scheme) {
+                      CompositionLocalProvider(LocalContentColor provides fg) {
+                          BoxWithConstraints(Modifier.fillMaxSize().background(bg).drawBehind {
+                              val r = size.width * .9f
+                              val c1 = Offset(size.width * a, size.height * .15f); val c2 = Offset(size.width * (1 - a), size.height * .8f)
+                              drawCircle(Brush.radialGradient(listOf(Color(0x6600E5FF), Color.Transparent), c1, r), r, c1)
+                              drawCircle(Brush.radialGradient(listOf(Color(0x667C4DFF), Color.Transparent), c2, r), r, c2)
+                          }) {
+                              val wide = maxWidth >= 600.dp
+                              val body: @Composable () -> Unit = {
+                                  Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).statusBarsPadding().padding(20.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                                      Text(Prefs.get("name", "Jarvis").uppercase(), fontSize = 32.sp, fontWeight = FontWeight.Black, letterSpacing = 8.sp)
+                                      when (tab) {
+                                          0 -> Home(dark, start)
+                                          1 -> BrainTab(dark)
+                                          2 -> VoiceTab(dark)
+                                          3 -> AlertsTab(dark)
+                                          else -> ProfileTab(dark) { dark = it }
+                                      }
+                                  }
+                              }
+                              if (wide) Row(Modifier.fillMaxSize()) {
+                                  NavigationRail(containerColor = Color.Transparent) {
+                                      Spacer(Modifier.height(24.dp))
+                                      tabs.forEachIndexed { i, t -> NavigationRailItem(tab == i, { tab = i }, { Text(t.first, fontSize = 22.sp) }, label = { Text(t.second) }) }
+                                  }
+                                  Box(Modifier.weight(1f), contentAlignment = Alignment.TopCenter) { Box(Modifier.widthIn(max = 780.dp)) { body() } }
+                              } else Column(Modifier.fillMaxSize()) {
+                                  Box(Modifier.weight(1f)) { body() }
+                                  NavigationBar(containerColor = Color.Transparent) {
+                                      tabs.forEachIndexed { i, t -> NavigationBarItem(tab == i, { tab = i }, { Text(t.first, fontSize = 20.sp) }, label = { Text(t.second) }) }
+                                  }
+                              }
+                          }
+                      }
+                  }
+              }
+
+              @Composable
+              fun Home(dark: Boolean, start: () -> Unit) {
+                  val t = tick
+                  val ov = Settings.canDrawOverlays(this)
+                  val mic = checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+                  val acc = JarvisAccess.inst != null
+                  val up = OverlayService.running
+                  Text("Your personal AI, one tap away.", color = LocalContentColor.current.copy(.7f))
+                  Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) { AndroidView({ OrbView(it) }, Modifier.size(210.dp)) }
+                  Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                      Stat("AI BRAIN", Brain.prov().uppercase(), dark, Modifier.weight(1f))
+                      Stat("VOICE", Prefs.get("engine", "android").uppercase(), dark, Modifier.weight(1f))
+                  }
+                  Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                      Stat("MODE", Prefs.get("mode", "personal").uppercase(), dark, Modifier.weight(1f))
+                      Stat("LANGUAGE", Prefs.get("lang", "en-US"), dark, Modifier.weight(1f))
+                  }
+                  Glass(dark) {
+                      Text("SYSTEM CHECK", fontWeight = FontWeight.Bold, letterSpacing = 2.sp)
+                      Check("Display over other apps", ov) { startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName"))) }
+                      Check("Microphone", mic) { start() }
+                      Check("Accessibility (control apps)", acc) { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }
+                      Check("Jarvis running", up) { start() }
+                      Text("On Android 13+: if Accessibility is greyed out, open App info for Jarvis, tap the ⋮ menu, then Allow restricted settings.",
+                          fontSize = 12.sp, color = LocalContentColor.current.copy(.6f))
+                  }
+                  Button(start, Modifier.fillMaxWidth().height(56.dp), shape = RoundedCornerShape(28.dp)) { Text("Start " + Prefs.get("name", "Jarvis"), fontWeight = FontWeight.Bold) }
+                  OutlinedButton({ stopService(Intent(this@MainActivity, OverlayService::class.java)); tick++ }, Modifier.fillMaxWidth()) { Text("Stop") }
+              }
+
+              @Composable
+              fun BrainTab(dark: Boolean) {
+                  var prov by remember { mutableStateOf(Brain.prov()) }
+                  Glass(dark) {
+                      Text("AI BRAIN", fontWeight = FontWeight.Bold, letterSpacing = 2.sp)
+                      PrefChips("prov", Brain.providers, "groq") { prov = it }
+                      Hint("groq = FREE, very fast (console.groq.com/keys)\ngemini = FREE tier (aistudio.google.com/apikey)\nanthropic = paid, smartest (console.anthropic.com)")
+                  }
+                  key(prov) {
+                      Glass(dark) {
+                          PrefField("API key ($prov)", "key_$prov", "", true)
+                          PrefField("Model", "model_$prov", Brain.defModel[prov] ?: "")
+                          Hint("If a model stops working, paste a newer model name from the provider's docs.")
+                      }
+                  }
+              }
+
+              @Composable
+              fun VoiceTab(dark: Boolean) {
+                  Glass(dark) {
+                      Text("VOICE ENGINE", fontWeight = FontWeight.Bold, letterSpacing = 2.sp)
+                      PrefChips("engine", listOf("android", "eleven", "google"), "android")
+                      Hint("android = built-in, offline, basic\neleven = ElevenLabs, most cinematic, free monthly credits\ngoogle = Google Cloud TTS, needs a billing card, free monthly quota\nIf a cloud voice fails, Jarvis falls back to the built-in voice.")
+                  }
+                  Glass(dark) {
+                      Text("ElevenLabs", fontWeight = FontWeight.Bold)
+                      PrefField("API key", "elKey", "", true)
+                      PrefField("Voice ID", "elVoice", "pNInz6obpgDQGcFmaJgB")
+                      PrefField("Model", "elModel", "eleven_flash_v2_5")
+                  }
+                  Glass(dark) {
+                      Text("Google Cloud TTS", fontWeight = FontWeight.Bold)
+                      PrefField("API key", "gKey", "", true)
+                      PrefField("Voice name", "gVoice", "en-GB-Neural2-D")
+                  }
+                  Button({ Voice.init(this@MainActivity); Voice.speak("At your service, " + Prefs.get("user", "Sir") + ". All systems are online.") },
+                      Modifier.fillMaxWidth().height(52.dp), shape = RoundedCornerShape(26.dp)) { Text("▶  Test voice") }
+              }
+
+              @Composable
+              fun AlertsTab(dark: Boolean) {
+                  Glass(dark) {
+                      Text("YOUTUBE VIRAL ALERTS", fontWeight = FontWeight.Bold, letterSpacing = 2.sp)
+                      PrefField("YouTube Data API key", "ytKey", "", true)
+                      PrefField("Channel ID (starts with UC)", "ytChannel")
+                      PrefField("Alert if views gained in ~15 min reach", "ytThresh", "1000")
+                      Hint("Checks every 15 minutes in the background. Say \"how is my channel\" anytime for live stats.")
+                  }
+              }
+
+              @Composable
+              fun ProfileTab(dark: Boolean, onDark: (Boolean) -> Unit) {
+                  Glass(dark) {
+                      Row(verticalAlignment = Alignment.CenterVertically) {
+                          Text("Dark theme", Modifier.weight(1f))
+                          Switch(dark, { Prefs.set("dark", if (it) "1" else "0"); onDark(it) })
+                      }
+                  }
+                  Glass(dark) {
+                      PrefField("Assistant name", "name", "Jarvis")
+                      PrefField("Call me", "user", "Sir")
+                      Text("MODE", fontWeight = FontWeight.Bold, letterSpacing = 2.sp)
+                      PrefChips("mode", listOf("personal", "commercial"), "personal")
+                      Text("LANGUAGE", fontWeight = FontWeight.Bold, letterSpacing = 2.sp)
+                      PrefChips("lang", listOf("en-US", "en-GB", "hi-IN", "es-ES", "fr-FR", "de-DE", "ar-SA", "pt-BR", "ja-JP", "ko-KR"), "en-US")
+                  }
+              }
+
+              @Composable fun Hint(s: String) = Text(s, fontSize = 12.sp, color = LocalContentColor.current.copy(.65f))
+
+              @Composable
+              fun Check(label: String, ok: Boolean, fix: () -> Unit) {
+                  Row(verticalAlignment = Alignment.CenterVertically) {
+                      Text(if (ok) "✅" else "⚠️"); Spacer(Modifier.width(10.dp)); Text(label, Modifier.weight(1f))
+                      if (!ok) TextButton(fix) { Text("Fix") }
+                  }
+              }
+
+              @Composable
+              fun Stat(title: String, value: String, dark: Boolean, mod: Modifier) {
+                  Glass(dark, mod) {
+                      Text(title, fontSize = 11.sp, letterSpacing = 2.sp, color = MaterialTheme.colorScheme.primary)
+                      Text(value, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                  }
+              }
+
+              @Composable
+              fun Glass(dark: Boolean, mod: Modifier = Modifier, content: @Composable ColumnScope.() -> Unit) {
+                  val sh = RoundedCornerShape(22.dp)
+                  Column(mod.fillMaxWidth().clip(sh).background(if (dark) Color.White.copy(.07f) else Color.White.copy(.6f))
+                      .border(1.dp, if (dark) Color(0x5500E5FF) else Color.White, sh).padding(16.dp),
+                      verticalArrangement = Arrangement.spacedBy(10.dp), content = content)
+              }
+
+              @Composable
+              fun PrefField(label: String, k: String, def: String = "", secret: Boolean = false) {
+                  var v by remember { mutableStateOf(Prefs.get(k, def)) }
+                  OutlinedTextField(v, { v = it; Prefs.set(k, it.trim()) }, label = { Text(label) }, singleLine = true,
+                      modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp),
+                      visualTransformation = if (secret) PasswordVisualTransformation() else VisualTransformation.None)
+              }
+
+              @Composable
+              fun PrefChips(k: String, opts: List<String>, def: String, onPick: (String) -> Unit = {}) {
+                  var v by remember { mutableStateOf(Prefs.get(k, def)) }
+                  Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                      opts.forEach { o -> FilterChip(v == o, { v = o; Prefs.set(k, o); onPick(o) }, { Text(o) }) }
+                  }
+              }
+          }
+          JVEOF18
+      - uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: 8.7
+      - name: Build debug APK
+        working-directory: jarvis
+        run: gradle assembleDebug --no-daemon --stacktrace
+      - name: Publish APK to Releases
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: jarvis-build-${{ github.run_number }}
+          name: Jarvis build ${{ github.run_number }}
+          files: jarvis/app/build/outputs/apk/debug/app-debug.apk
